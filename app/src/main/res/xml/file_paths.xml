@@ -1,0 +1,4 @@
+<paths>
+    <files-path name="scans" path="scans/" />
+    <cache-path name="share" path="share/" />
+</paths>
