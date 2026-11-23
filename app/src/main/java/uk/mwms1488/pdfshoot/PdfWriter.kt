@@ -11,7 +11,7 @@ import java.util.Locale
  * Це швидко й без втрати якості, а файл виходить не більший за самі знімки.
  *
  * Розкладка об'єктів стала: 1 — каталог, 2 — список сторінок, далі по три на сторінку
- * (3+3k — сторінка, 4+3k — знімок, 5+3k — вміст). На неї спирається [rotatePage].
+ * (3+3k — сторінка, 4+3k — знімок, 5+3k — вміст). На неї спираються [rotations] і [setRotations].
  */
 object PdfWriter {
     private const val PAGE_WIDTH = 595f // A4 у пунктах; висота — за пропорцією знімка
@@ -68,36 +68,74 @@ object PdfWriter {
         }
     }
 
-    /** Повертає сторінку на 90° за годинниковою, правлячи три байти у файлі. false — файл не наш. */
-    fun rotatePage(file: File, page: Int): Boolean = runCatching {
-        RandomAccessFile(file, "rw").use { raf ->
-            val tail = ByteArray(minOf(64L, raf.length()).toInt())
-            raf.seek(raf.length() - tail.size)
-            raf.readFully(tail)
-            val xref = latin(tail).substringAfter("startxref", "").trim().lineSequence().first().trim().toLong()
-
-            val head = ByteArray(32)
-            raf.seek(xref)
-            val headText = latin(head, raf.read(head))
-            check(headText.startsWith("xref\n0 "))
-            val entries = xref + headText.indexOf('\n', 5) + 1
-
-            val entry = ByteArray(10)
-            raf.seek(entries + 20L * (3 + page * 3))
-            raf.readFully(entry)
-            val objectAt = latin(entry).toLong()
-
-            val start = ByteArray(96)
-            raf.seek(objectAt)
-            val text = latin(start, raf.read(start))
-            val at = text.indexOf("/Rotate ")
-            check(at >= 0 && text.contains("/Type /Page "))
-            val current = text.substring(at + 8, at + 11).trim().toInt()
-            raf.seek(objectAt + at + 8)
-            raf.write(((current + 90) % 360).toString().padEnd(3).toByteArray(Charsets.ISO_8859_1))
-            true
+    /** Кут повороту кожної сторінки (0, 90, 180, 270); null — файл записаний не нами. */
+    fun rotations(file: File): List<Int>? = runCatching {
+        RandomAccessFile(file, "r").use { raf ->
+            val layout = layout(raf)
+            List(layout.pages) { page ->
+                val field = ByteArray(3)
+                raf.seek(rotateField(raf, layout, page))
+                raf.readFully(field)
+                latin(field).trim().toInt()
+            }
         }
-    }.getOrDefault(false)
+    }.getOrNull()
+
+    /**
+     * Ставить сторінкам кути з [rotations] (номер сторінки → кут), правлячи по три байти у файлі —
+     * знімки не перетискаються. Пишеться в копію, яка потім замінює файл: обірваний запис не псує документ.
+     */
+    fun setRotations(file: File, rotations: Map<Int, Int>): Boolean {
+        val tmp = File(file.parentFile, file.name + ".tmp")
+        return runCatching {
+            file.copyTo(tmp, overwrite = true)
+            RandomAccessFile(tmp, "rw").use { raf ->
+                val layout = layout(raf)
+                for ((page, degrees) in rotations) {
+                    require(page in 0 until layout.pages)
+                    raf.seek(rotateField(raf, layout, page))
+                    raf.write((((degrees % 360) + 360) % 360).toString().padEnd(3).toByteArray(Charsets.ISO_8859_1))
+                }
+                raf.fd.sync()
+            }
+            check(tmp.renameTo(file))
+            true
+        }.getOrElse {
+            tmp.delete()
+            false
+        }
+    }
+
+    /** Де в файлі таблиця адрес об'єктів і скільки сторінок. */
+    private class Layout(val entries: Long, val pages: Int)
+
+    private fun layout(raf: RandomAccessFile): Layout {
+        val tail = ByteArray(minOf(64L, raf.length()).toInt())
+        raf.seek(raf.length() - tail.size)
+        raf.readFully(tail)
+        val xref = latin(tail).substringAfter("startxref", "").trim().lineSequence().first().trim().toLong()
+        val head = ByteArray(32)
+        raf.seek(xref)
+        val headText = latin(head, raf.read(head))
+        check(headText.startsWith("xref\n0 "))
+        val size = headText.substring(7).substringBefore('\n').trim().toInt()
+        check(size >= 6 && (size - 3) % 3 == 0)
+        return Layout(entries = xref + headText.indexOf('\n', 5) + 1, pages = (size - 3) / 3)
+    }
+
+    /** Позиція трьох знаків кута «/Rotate» у словнику сторінки [page]. */
+    private fun rotateField(raf: RandomAccessFile, layout: Layout, page: Int): Long {
+        val entry = ByteArray(10)
+        raf.seek(layout.entries + 20L * (3 + page * 3))
+        raf.readFully(entry)
+        val objectAt = latin(entry).toLong()
+        val start = ByteArray(96)
+        raf.seek(objectAt)
+        val text = latin(start, raf.read(start))
+        val at = text.indexOf("/Rotate ")
+        check(at >= 0 && text.contains("/Type /Page "))
+        return objectAt + at + 8
+    }
 
     private fun latin(bytes: ByteArray, length: Int = bytes.size) =
         String(bytes, 0, length.coerceAtLeast(0), Charsets.ISO_8859_1)

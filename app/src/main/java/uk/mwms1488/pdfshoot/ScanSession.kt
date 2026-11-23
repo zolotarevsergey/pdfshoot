@@ -36,6 +36,7 @@ sealed interface Screen {
     data class Review(val index: Int) : Screen
     data class Crop(val id: Long) : Screen
     data class Viewer(val path: String) : Screen
+    data class Pages(val path: String) : Screen
 }
 
 enum class FlashMode(val label: String) { Off("Вимк."), Auto("Авто"), On("Увімк."), Torch("Ліхтар") }

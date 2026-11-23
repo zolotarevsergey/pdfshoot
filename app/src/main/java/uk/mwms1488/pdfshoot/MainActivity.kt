@@ -138,7 +138,10 @@ private fun App() {
         )
     }
 
-    val screen = session.screen.let { if (it is Screen.Viewer && !File(it.path).exists()) Screen.List else it }
+    val screen = session.screen.let {
+        val path = (it as? Screen.Viewer)?.path ?: (it as? Screen.Pages)?.path
+        if (path != null && !File(path).exists()) Screen.List else it
+    }
     // Оновлення закриває застосунок: воно чекає, доки користувач повернеться до списку без скану.
     SideEffect { Updater.hold = screen != Screen.List || saving || naming != null || session.pages.isNotEmpty() }
 
@@ -227,9 +230,19 @@ private fun App() {
                     file = file,
                     onBack = { session.screen = Screen.List },
                     onShare = { Docs.share(context, file) },
-                    onChanged = { version++ },
+                    onRotate = { session.screen = Screen.Pages(file.path) },
                 )
             }
+
+            is Screen.Pages -> PagesScreen(
+                file = File(target.path),
+                onClose = { session.screen = Screen.Viewer(target.path) },
+                onSaved = {
+                    version++ // мініатюра в списку перемалюється
+                    session.screen = Screen.Viewer(target.path)
+                    Toast.makeText(context, "Збережено", Toast.LENGTH_SHORT).show()
+                },
+            )
         }
     }
 }

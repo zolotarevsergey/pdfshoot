@@ -22,21 +22,21 @@ class PdfWriterTest {
 
     /** The file is left in build/ so it can be opened with a real PDF reader as well. */
     @Test
-    fun writesPagesAndRotatesInPlace() {
+    fun writesPagesAndSetsRotations() {
         val file = File("build/test-pdf/sample.pdf").apply { parentFile.mkdirs(); delete() }
         PdfWriter.write(listOf(jpeg(600, 800), jpeg(800, 600, gray = true), jpeg(300, 300)), file)
         val before = file.length()
 
-        fun rotations() = Regex("/Type /Page /Rotate (\\d+)").findAll(file.readText(Charsets.ISO_8859_1))
-            .map { it.groupValues[1].toInt() }.toList()
-        assertEquals(listOf(0, 0, 0), rotations())
-
-        assertTrue(PdfWriter.rotatePage(file, 1))
-        assertEquals(listOf(0, 90, 0), rotations())
-        repeat(3) { assertTrue(PdfWriter.rotatePage(file, 2)) }
-        assertEquals(listOf(0, 90, 270), rotations())
-        assertTrue(PdfWriter.rotatePage(file, 2))
-        assertEquals(listOf(0, 90, 0), rotations())
+        assertEquals(listOf(0, 0, 0), PdfWriter.rotations(file))
+        assertTrue(PdfWriter.setRotations(file, mapOf(1 to 90, 2 to 270)))
+        assertEquals(listOf(0, 90, 270), PdfWriter.rotations(file))
+        assertTrue(PdfWriter.setRotations(file, mapOf(2 to 360, 0 to -90)))
+        assertEquals(listOf(270, 90, 0), PdfWriter.rotations(file))
+        // Справжній PDF-читач бачить ті самі кути (сам файл — у build/test-pdf).
+        val parsed = Regex("/Type /Page /Rotate (\\d+)").findAll(file.readText(Charsets.ISO_8859_1)).map { it.groupValues[1].toInt() }.toList()
+        assertEquals(listOf(270, 90, 0), parsed)
+        assertEquals(null, PdfWriter.rotations(File("build.gradle.kts")))
+        assertTrue(!File(file.path + ".tmp").exists())
         assertEquals(before, file.length())
     }
 }

@@ -5,9 +5,15 @@ import android.widget.Toast
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
+import kotlin.math.exp
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -66,16 +72,12 @@ private const val MAX_ZOOM = 5f
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ViewerScreen(file: File, onBack: () -> Unit, onShare: () -> Unit, onChanged: () -> Unit) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var revision by remember { mutableIntStateOf(0) } // росте після повороту — PDF відкривається наново
-
-    val pdf = remember(file, revision) { runCatching { PdfDoc(file) }.getOrNull() }
+fun ViewerScreen(file: File, onBack: () -> Unit, onShare: () -> Unit, onRotate: () -> Unit) {
+    val pdf = remember(file) { runCatching { PdfDoc(file) }.getOrNull() }
     DisposableEffect(pdf) { onDispose { pdf?.close() } }
 
     val listState = rememberLazyListState()
-    // «Поточна» сторінка — та, що перетинає середину екрана: її показує лічильник і повертає кнопка.
+    // «Поточна» сторінка — та, що перетинає середину екрана: її показує лічильник.
     val currentPage by remember {
         derivedStateOf {
             val layout = listState.layoutInfo
@@ -93,21 +95,9 @@ fun ViewerScreen(file: File, onBack: () -> Unit, onShare: () -> Unit, onChanged:
                     IconButton(onClick = onBack) { Icon(painterResource(R.drawable.ic_back), contentDescription = "Назад") }
                 },
                 actions = {
-                    IconButton(
-                        enabled = pdf != null,
-                        onClick = {
-                            val page = currentPage
-                            scope.launch {
-                                val done = withContext(Dispatchers.IO) { PdfWriter.rotatePage(file, page) }
-                                if (done) {
-                                    revision++
-                                    onChanged()
-                                } else {
-                                    Toast.makeText(context, "Не вдалося повернути сторінку", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        },
-                    ) { Icon(painterResource(R.drawable.ic_rotate), contentDescription = "Повернути сторінку") }
+                    IconButton(enabled = pdf != null, onClick = onRotate) {
+                        Icon(painterResource(R.drawable.ic_rotate), contentDescription = "Повернути сторінки")
+                    }
                     IconButton(onClick = onShare) {
                         Icon(painterResource(R.drawable.ic_share), contentDescription = "Поширити")
                     }
@@ -135,49 +125,32 @@ fun ViewerScreen(file: File, onBack: () -> Unit, onShare: () -> Unit, onChanged:
             var offsetX by remember { mutableFloatStateOf(0f) }
             var offsetY by remember { mutableFloatStateOf(0f) }
 
-            fun clamp() {
-                val maxX = widthPx * (scale - 1f) / 2f
-                val maxY = heightPx * (scale - 1f) / 2f
-                offsetX = offsetX.coerceIn(-maxX, maxX)
-                offsetY = offsetY.coerceIn(-maxY, maxY)
-            }
-
-            val transform = rememberTransformableState { zoom, pan, _ ->
-                scale = (scale * zoom).coerceIn(1f, MAX_ZOOM)
-                offsetX += pan.x
-                // Вертикальний рух при збільшенні гортає список; зсув самого полотна потрібен лише
-                // на краях, щоб дістатися верху першої й низу останньої сторінки.
-                var dy = pan.y
-                if (offsetY != 0f && dy != 0f && sign(dy) != sign(offsetY)) {
-                    val back = dy.coerceIn(-abs(offsetY), abs(offsetY))
-                    offsetY += back
-                    dy -= back
-                }
-                val scrolled = -listState.dispatchRawDelta(-dy / scale) * scale
-                offsetY += dy - scrolled
-                clamp()
+            /**
+             * Масштаб у [zoom] разів навколо точки екрана [focus] плюс зсув [pan]. Вертикальне, що
+             * виходить за межі збільшеного кадру, гортає список: так збільшене читається донизу.
+             */
+            fun transform(zoom: Float, pan: Offset, focus: Offset) {
+                val old = scale
+                val new = (old * zoom).coerceIn(1f, MAX_ZOOM)
+                val k = new / old
+                val cx = widthPx / 2
+                val cy = heightPx / 2
+                var tx = focus.x - cx - (focus.x - cx - offsetX) * k + pan.x
+                var ty = focus.y - cy - (focus.y - cy - offsetY) * k + pan.y
+                scale = new
+                val maxX = widthPx * (new - 1f) / 2f
+                val maxY = heightPx * (new - 1f) / 2f
+                tx = tx.coerceIn(-maxX, maxX)
+                val over = ty - ty.coerceIn(-maxY, maxY)
+                if (over != 0f) ty += listState.dispatchRawDelta(-over / new) * new
+                offsetX = tx
+                offsetY = ty.coerceIn(-maxY, maxY)
             }
 
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize()
-                    .pointerInput(Unit) {
-                        detectTapGestures(onDoubleTap = { tap ->
-                            if (scale > 1f) {
-                                scale = 1f
-                                offsetX = 0f
-                                offsetY = 0f
-                            } else {
-                                // Збільшуємо те місце, куди торкнулись, а не центр екрана.
-                                scale = 2.5f
-                                offsetX = (widthPx / 2 - tap.x) * (scale - 1)
-                                offsetY = (heightPx / 2 - tap.y) * (scale - 1)
-                                clamp()
-                            }
-                        })
-                    }
-                    // Поки масштаб 1 — палець просто гортає список; жест забираємо лише при збільшенні.
-                    .transformable(transform, canPan = { scale > 1f })
+                    .pointerInput(Unit) { zoomGestures(::transform, { scale }) }
                     .graphicsLayer {
                         scaleX = scale
                         scaleY = scale
@@ -233,6 +206,80 @@ fun ViewerScreen(file: File, onBack: () -> Unit, onShare: () -> Unit, onChanged:
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * Жести перегляду. Обробляються раніше за прокрутку списку (прохід Initial), тож вона їх не перехоплює:
+ * - два пальці — масштаб навколо точки між ними й зсув;
+ * - подвійний дотик — збільшити в точці дотику або повернутись до звичайного розміру;
+ * - подвійний дотик з утриманням і рухом вниз/вгору — плавно збільшити/зменшити одним пальцем;
+ * - один палець при збільшенні — рух збільшеної сторінки; без збільшення — звичайна прокрутка списку.
+ */
+private suspend fun PointerInputScope.zoomGestures(
+    transform: (zoom: Float, pan: Offset, focus: Offset) -> Unit,
+    scale: () -> Float,
+) {
+    var lastTapUp = 0L
+    var lastTapAt = Offset.Zero
+    val slop = viewConfiguration.touchSlop
+    val doubleTapTimeout = viewConfiguration.doubleTapTimeoutMillis
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        val secondTap = down.uptimeMillis - lastTapUp < doubleTapTimeout && (down.position - lastTapAt).getDistance() < slop * 4
+        var multi = false
+        var dragZoom = false
+        var dragging = false
+        var travel = 0f
+        var upTime = down.uptimeMillis
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val pressed = event.changes.filter { it.pressed }
+            if (pressed.isEmpty()) {
+                upTime = event.changes.maxOf { it.uptimeMillis }
+                break
+            }
+            if (pressed.size >= 2) {
+                multi = true
+                val zoom = event.calculateZoom()
+                val pan = event.calculatePan()
+                transform(zoom, pan, event.calculateCentroid(useCurrent = true))
+                event.changes.forEach { it.consume() }
+                continue
+            }
+            if (multi) { // після щипка лишився один палець — жест скінчився, нічого не робимо
+                event.changes.forEach { it.consume() }
+                continue
+            }
+            val change = pressed.first()
+            val delta = change.position - change.previousPosition
+            travel += delta.getDistance()
+            when {
+                secondTap -> if (dragZoom || travel > slop) {
+                    dragZoom = true
+                    // Вниз — більше, вгору — менше; центр — там, де був подвійний дотик.
+                    transform(exp(delta.y * 0.006f), Offset.Zero, down.position)
+                    change.consume()
+                }
+                scale() > 1.01f -> if (dragging || travel > slop) {
+                    dragging = true
+                    transform(1f, delta, change.position)
+                    change.consume()
+                }
+            }
+        }
+        when {
+            secondTap && !dragZoom && !multi -> {
+                if (scale() > 1.01f) transform(1f / scale(), Offset.Zero, down.position)
+                else transform(2.5f, Offset.Zero, down.position)
+                lastTapUp = 0L
+            }
+            !multi && travel < slop -> {
+                lastTapUp = upTime
+                lastTapAt = down.position
+            }
+            else -> lastTapUp = 0L
         }
     }
 }
