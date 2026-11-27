@@ -62,6 +62,24 @@ class DocImageTest {
         assertClose(quad!!, photo.width, photo.height)
     }
 
+    /**
+     * Глибока тінь від руки чи телефона (папір утричі темніший) з розмитим краєм — така лишалась
+     * сірою плямою: її приймали за фото. Має стати білим папером; темне фото поруч — лишитись темним.
+     */
+    @Test fun handShadow() {
+        val photo = photo(Color.rgb(92, 70, 52), handShadow = true)
+        val file = File(out, "hand-photo.jpg").apply { outputStream().use { photo.compress(Bitmap.CompressFormat.JPEG, 95, it) } }
+        val quad = DocImage.detect(file, 0)
+        assertNotNull("документ не знайдено", quad)
+        val jpeg = DocImage.process(file, 0, quad!!, 0, Filter.Auto)
+        File(out, "hand-Auto.jpg").writeBytes(jpeg)
+        val page = android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+        val paper = brightness(page, 1500f / 2100, 1820f / 2970)
+        assertTrue("папір у тіні не вибілений: $paper", paper > 225)
+        val dark = brightness(page, 0.24f, 0.74f)
+        assertTrue("фото вибілене: $dark", dark < 170)
+    }
+
     private fun run(name: String, background: Int) {
         val photo = photo(background)
         val file = File(out, "$name-photo.jpg").apply { outputStream().use { photo.compress(Bitmap.CompressFormat.JPEG, 95, it) } }
@@ -79,8 +97,28 @@ class DocImageTest {
             val aspect = size.outWidth.toFloat() / size.outHeight
             assertTrue("пропорції ${size.outWidth}×${size.outHeight}, а мали б бути A4", abs(aspect - 0.7071f) < 0.01f)
             android.util.Log.i("DocImageTest", "$name ${filter.name}: ${jpeg.size / 1024} KB, ${(System.nanoTime() - t) / 1_000_000} ms")
+            if (filter == Filter.Auto) {
+                val page = android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+                // Порожнє поле вгорі ліворуч — у глибокій тіні (центр тіні там): має стати білим.
+                val shadowed = brightness(page, 0.045f, 0.035f)
+                assertTrue("поле в тіні не вибілене: $shadowed", shadowed > 225)
+                // Темне фото на аркуші — не тінь: лишається темним.
+                val photo = brightness(page, 0.24f, 0.74f)
+                assertTrue("фото вибілене: $photo", photo < 170)
+            }
         }
         android.util.Log.i("DocImageTest", "$name detect: $detectMs ms, quad=$quad")
+    }
+
+    /** Середня яскравість квадратика 21×21 у точці (частки ширини й висоти). */
+    private fun brightness(page: Bitmap, fx: Float, fy: Float): Int {
+        val cx = (page.width * fx).toInt(); val cy = (page.height * fy).toInt()
+        var sum = 0; var n = 0
+        for (y in cy - 10..cy + 10) for (x in cx - 10..cx + 10) {
+            val c = page.getPixel(x, y)
+            sum += (Color.red(c) + Color.green(c) + Color.blue(c)) / 3; n++
+        }
+        return sum / n
     }
 
     private fun assertClose(quad: Quad, w: Int, h: Int) {
@@ -92,7 +130,7 @@ class DocImageTest {
     }
 
     /** 12-Мп «фото»: аркуш з текстом, таблицею, печаткою й фото в перспективі, з тінню й шумом. */
-    private fun photo(background: Int): Bitmap {
+    private fun photo(background: Int, handShadow: Boolean = false): Bitmap {
         val page = Bitmap.createBitmap(2100, 2970, Bitmap.Config.ARGB_8888)
         Canvas(page).apply {
             drawColor(Color.rgb(250, 249, 245))
@@ -140,6 +178,13 @@ class DocImageTest {
             drawRect(0f, 0f, 3000f, 4000f, Paint().apply {
                 shader = LinearGradient(0f, 0f, 0f, 4000f, Color.argb(0, 0, 0, 0), Color.argb(70, 30, 20, 0), Shader.TileMode.CLAMP)
             })
+            if (handShadow) {
+                val c = floatArrayOf(1500f, 1880f).also { m.mapPoints(it) }
+                val shade = Color.argb(175, 10, 10, 20)
+                drawRect(0f, 0f, 3000f, 4000f, Paint().apply {
+                    shader = RadialGradient(c[0], c[1], 700f, intArrayOf(shade, shade, Color.TRANSPARENT), floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
+                })
+            }
         }
         return shot
     }

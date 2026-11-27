@@ -6,16 +6,20 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
@@ -58,6 +62,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -83,6 +88,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -145,6 +151,8 @@ private fun CameraContent(session: ScanSession, onClose: () -> Unit, onDone: () 
     val controller = remember { LifecycleCameraController(context) }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
     val captureExecutor = remember { Executors.newSingleThreadExecutor() }
+    val focusHandler = remember { Handler(Looper.getMainLooper()) }
+    var lastTapFocus by remember { mutableLongStateOf(0L) }
 
     fun applyFlash() {
         controller.imageCaptureFlashMode = when (session.flash) {
@@ -189,6 +197,9 @@ private fun CameraContent(session: ScanSession, onClose: () -> Unit, onDone: () 
                 }
             }
         }
+        controller.tapToFocusState.observe(lifecycleOwner) { state ->
+            if (state == CameraController.TAP_TO_FOCUS_STARTED) lastTapFocus = System.currentTimeMillis()
+        }
         controller.bindToLifecycle(lifecycleOwner)
         controller.initializationFuture.addListener({
             ready = runCatching { controller.initializationFuture.get() }.isSuccess
@@ -196,6 +207,7 @@ private fun CameraContent(session: ScanSession, onClose: () -> Unit, onDone: () 
             else Toast.makeText(context, "Камера недоступна — можна взяти фото з галереї", Toast.LENGTH_LONG).show()
         }, main)
         onDispose {
+            focusHandler.removeCallbacksAndMessages(null)
             controller.clearImageAnalysisAnalyzer()
             controller.unbind()
             analysisExecutor.shutdown()
@@ -230,12 +242,34 @@ private fun CameraContent(session: ScanSession, onClose: () -> Unit, onDone: () 
                 }
             }
         }
-        try {
-            controller.takePicture(captureExecutor, callback)
-        } catch (e: Exception) {
-            capturing = false
-            Toast.makeText(context, "Камера ще не готова", Toast.LENGTH_SHORT).show()
+        var taken = false
+        fun shoot() {
+            if (taken) return
+            taken = true
+            try {
+                controller.takePicture(captureExecutor, callback)
+            } catch (e: Exception) {
+                capturing = false
+                Toast.makeText(context, "Камера ще не готова", Toast.LENGTH_SHORT).show()
+            }
         }
+        // CameraX сам наводить фокус перед знімком лише зі спалахом; інакше знімає з того, на чому
+        // зупинився безперервний автофокус, а зблизька він часто «плаває» — текст розмитий. Тож
+        // спершу фокус на центр кадру (там документ), і знімаємо, щойно навівся (або за 1.5 с).
+        // Якщо користувач щойно сам торкнувся екрана для фокусу — його вибір не перебиваємо.
+        val camera = controller.cameraControl
+        if (camera == null || System.currentTimeMillis() - lastTapFocus < 4000) {
+            shoot()
+            return
+        }
+        runCatching {
+            val point = SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(0.5f, 0.5f, 0.3f)
+            val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
+                .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                .build()
+            camera.startFocusAndMetering(action).addListener(::shoot, main)
+            focusHandler.postDelayed(::shoot, 1500)
+        }.onFailure { shoot() }
     }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {

@@ -272,18 +272,15 @@ object DocImage {
         val f = 320.0 / max(img.cols(), img.rows())
         val small = Mat()
         Imgproc.resize(img, small, Size(), f, f, Imgproc.INTER_AREA)
-        fun paper(kernelSize: Double, sigma: Double): Mat {
-            val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(kernelSize, kernelSize))
-            val m = Mat()
-            Imgproc.dilate(small, m, kernel) // світле «з'їдає» темне, вужче за ядро
-            Imgproc.GaussianBlur(m, m, Size(0.0, 0.0), sigma)
-            m.convertTo(m, CvType.CV_32F)
-            kernel.release()
-            return m
-        }
         // Дрібне ядро стирає лише текст і точно повторює тіні. Гладка поверхня, підігнана тільки
         // під папір, не бачить і великих фото чи заливок.
-        val fine = paper(9.0, 6.0)
+        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(9.0, 9.0))
+        val dilated = Mat()
+        Imgproc.dilate(small, dilated, kernel) // світле «з'їдає» темне, вужче за ядро
+        kernel.release()
+        val fine = Mat()
+        Imgproc.GaussianBlur(dilated, fine, Size(0.0, 0.0), 6.0)
+        fine.convertTo(fine, CvType.CV_32F)
         val coarse = paperSurface(fine)
         // Де дрібна оцінка набагато темніша за велику — там вміст (фото), а не тінь: беремо велику,
         // і фото лишається фото, а не вибілюється.
@@ -294,6 +291,10 @@ object DocImage {
         Core.multiply(weight, Scalar.all(1 / 0.15), weight)
         Core.min(weight, Scalar.all(1.0), weight)
         Core.max(weight, Scalar.all(0.0), weight)
+        // Але глибока тінь від руки чи телефона теж набагато темніша за папір. Її видає межа: тінь
+        // світлішає поступово, а фото й заливка мають різкий край. Тіні повертаємо дрібну оцінку.
+        keepShadows(weight, dilated)
+        dilated.release()
         // Біля краю фото дрібна оцінка — суміш паперу й фото, і край висвітлювався б обідком:
         // зону вмісту розширюємо на розмір ядра, перехід розмиваємо.
         val grow = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(17.0, 17.0))
@@ -310,6 +311,78 @@ object DocImage {
         Imgproc.resize(bgSmall, bg, img.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
         listOf(small, fine, coarse, weight, bg32, bgSmall).forEach { it.release() }
         return bg
+    }
+
+    /**
+     * Ділянки, де [weight] < 1 («вміст»), розрізані по різких краях і поділені на зв'язні області.
+     * Різкий край — де яскравість ([dilated]: зменшений кадр, тексту вже немає) на 2 пікселі падає
+     * щонайменше на 30%: так обриваються фото й заливки, а тінь світлішає поступово. Область, межа
+     * якої здебільшого різка, — фото чи заливка; решта — тінь, і отримує вагу 1: її вирівнює дрібна
+     * оцінка, як і решту паперу. Розрізання потрібне, бо тінь, що накриває фото, зливається з ним.
+     */
+    private fun keepShadows(weight: Mat, dilated: Mat) {
+        val cols = weight.cols()
+        val rows = weight.rows()
+        val n = cols * rows
+        val w = Mat()
+        if (weight.channels() == 1) weight.copyTo(w) else Imgproc.cvtColor(weight, w, Imgproc.COLOR_BGR2GRAY)
+        val wa = FloatArray(n).also { w.get(0, 0, it) }
+        val g = Mat()
+        if (dilated.channels() == 1) dilated.copyTo(g) else Imgproc.cvtColor(dilated, g, Imgproc.COLOR_BGR2GRAY)
+        g.convertTo(g, CvType.CV_32F)
+        val k3 = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
+        val hi = Mat(); val lo = Mat()
+        Imgproc.dilate(g, hi, k3)
+        Imgproc.erode(g, lo, k3)
+        val ha = FloatArray(n).also { hi.get(0, 0, it) }
+        val la = FloatArray(n).also { lo.get(0, 0, it) }
+        val sharp = Mat(rows, cols, CvType.CV_8U)
+        sharp.put(0, 0, ByteArray(n) { if ((ha[it] - la[it]) / (ha[it] + 8) > 0.3f) 1 else 0 })
+        Imgproc.dilate(sharp, sharp, k3)
+        val sa = ByteArray(n).also { sharp.get(0, 0, it) }
+        val area = Mat(rows, cols, CvType.CV_8U)
+        area.put(0, 0, ByteArray(n) { if (wa[it] < 0.98f && sa[it].toInt() == 0) 1 else 0 })
+        val labels = Mat()
+        val count = Imgproc.connectedComponents(area, labels, 4, CvType.CV_32S)
+        val lab = IntArray(n).also { labels.get(0, 0, it) }
+        listOf(w, g, k3, hi, lo, sharp, area, labels).forEach { it.release() }
+        if (count <= 1) return
+
+        val hasCore = BooleanArray(count)
+        for (i in 0 until n) if (lab[i] > 0 && wa[i] < 0.5f) hasCore[lab[i]] = true
+        // Межа області — пікселі поза областями в радіусі 2 від неї: яка їх частка на різкому краї.
+        val border = IntArray(count)
+        val sharpBorder = IntArray(count)
+        val seen = IntArray(25)
+        for (y in 0 until rows) for (x in 0 until cols) {
+            val i = y * cols + x
+            if (lab[i] != 0) continue
+            var k = 0
+            for (dy in -2..2) {
+                val yy = y + dy
+                if (yy < 0 || yy >= rows) continue
+                for (dx in -2..2) {
+                    val xx = x + dx
+                    if (xx < 0 || xx >= cols) continue
+                    val l = lab[yy * cols + xx]
+                    if (l == 0) continue
+                    var dup = false
+                    for (j in 0 until k) if (seen[j] == l) { dup = true; break }
+                    if (dup) continue
+                    seen[k++] = l
+                    border[l]++
+                    if (sa[i].toInt() != 0) sharpBorder[l]++
+                }
+            }
+        }
+        val shadow = BooleanArray(count) { l ->
+            l != 0 && (!hasCore[l] || border[l] == 0 || sharpBorder[l] < 0.5 * border[l])
+        }
+        if (shadow.none { it }) return
+        val ch = weight.channels()
+        val data = FloatArray(n * ch).also { weight.get(0, 0, it) }
+        for (i in 0 until n) if (shadow[lab[i]]) for (c in 0 until ch) data[i * ch + c] = 1f
+        weight.put(0, 0, data)
     }
 
     /**
@@ -461,9 +534,21 @@ object DocImage {
         quadsFrom(binary, minArea, candidates)
         binary.release()
 
+        // Сторони кандидатів — точніше, за самими краями: аркуш часто трохи вигнутий, і пряма між
+        // грубо знайденими кутами йде повз край, тож справжній аркуш не проходив перевірку.
+        val edgeMap = Mat()
+        Imgproc.Canny(small, edgeMap, 30.0, 90.0)
+        val edgePoints = Mat()
+        Core.findNonZero(edgeMap, edgePoints)
+        edgeMap.release()
+        val ep = IntArray((edgePoints.total() * 2).toInt()) // CV_32SC2: x, y парами
+        if (ep.isNotEmpty()) edgePoints.get(0, 0, ep)
+        edgePoints.release()
+        val refined = candidates.map { c -> refineSides(c, ep, w, h)?.takeIf { reasonable(it, w, h) } ?: c }
+
         var best: List<Point>? = null
         var bestScore = 0.0
-        for (c in candidates) {
+        for (c in refined) {
             if (!reasonable(c, w, h)) continue
             val area = polygonArea(c) / (w * h)
             val edge = edgeSupport(c, support)
@@ -516,6 +601,61 @@ object DocImage {
             hull.release()
         }
         contours.forEach { it.release() }
+    }
+
+    /**
+     * Кожна сторона — пряма, підігнана (стійко, Huber) до точок країв [edges] (x, y парами) у смузі
+     * ±12 px навколо неї (на кожен піксель сторони — найглибша точка), без околів кутів; кути — перетини сусідніх прямих. Сторона, біля якої країв
+     * замало (край кадру, розмитий край), лишається як була. null — геометрія зламалась.
+     */
+    private fun refineSides(p: List<Point>, edges: IntArray, w: Double, h: Double): List<Point>? {
+        val q = Quad.order(p.map { Offset(it.x.toFloat(), it.y.toFloat()) }).corners.map { Point(it.x.toDouble(), it.y.toDouble()) }
+        val cx = q.sumOf { it.x } / 4
+        val cy = q.sumOf { it.y } / 4
+        // Пряма: точка й одиничний напрям.
+        val lines = (0 until 4).map { i ->
+            val a = q[i]; val b = q[(i + 1) % 4]
+            val len = dist(a, b)
+            val ux = (b.x - a.x) / len; val uy = (b.y - a.y) / len
+            // Нормаль усередину чотирикутника.
+            var nx = -uy; var ny = ux
+            if ((cx - a.x) * nx + (cy - a.y) * ny < 0) { nx = -nx; ny = -ny }
+            // Уздовж сторони, на кожен піксель — найглибший (найближчий до середини) край у смузі:
+            // поруч з аркушем часто лежить ще край (пачка паперів, тінь, файл), і він ззовні.
+            val depth = DoubleArray(len.toInt() + 1) { Double.NaN }
+            val px = IntArray(depth.size); val py = IntArray(depth.size)
+            var k = 0
+            while (k < edges.size) {
+                val ex = edges[k]; val ey = edges[k + 1]
+                k += 2
+                val rx = ex - a.x; val ry = ey - a.y
+                val t = rx * ux + ry * uy
+                if (t < 0.08 * len || t > 0.92 * len) continue
+                val s = rx * nx + ry * ny
+                if (abs(s) >= 12) continue
+                val bin = t.toInt()
+                if (depth[bin].isNaN() || s > depth[bin]) { depth[bin] = s; px[bin] = ex; py[bin] = ey }
+            }
+            val near = depth.indices.filter { !depth[it].isNaN() }.map { Point(px[it].toDouble(), py[it].toDouble()) }
+            if (near.size < 0.3 * len) return@map doubleArrayOf(a.x, a.y, ux, uy)
+            val pts = MatOfPoint2f(*near.toTypedArray())
+            val line = Mat()
+            Imgproc.fitLine(pts, line, Imgproc.DIST_HUBER, 0.0, 0.01, 0.01)
+            val v = FloatArray(4).also { line.get(0, 0, it) }
+            pts.release(); line.release()
+            doubleArrayOf(v[2].toDouble(), v[3].toDouble(), v[0].toDouble(), v[1].toDouble())
+        }
+        val out = (0 until 4).map { i ->
+            val l1 = lines[(i + 3) % 4]; val l2 = lines[i]
+            // l1.p + s·l1.d = l2.p + t·l2.d
+            val det = l1[2] * -l2[3] - l1[3] * -l2[2]
+            if (abs(det) < 1e-6) return null
+            val dx = l2[0] - l1[0]; val dy = l2[1] - l1[1]
+            val s = (dx * -l2[3] - dy * -l2[2]) / det
+            Point(l1[0] + s * l1[2], l1[1] + s * l1[3])
+        }
+        if (out.any { it.x < -0.02 * w || it.y < -0.02 * h || it.x > 1.02 * w || it.y > 1.02 * h }) return null
+        return out.map { Point(it.x.coerceIn(0.0, w - 1), it.y.coerceIn(0.0, h - 1)) }
     }
 
     /** Опуклий, кути між 40° і 140°, не надто вузький. */
