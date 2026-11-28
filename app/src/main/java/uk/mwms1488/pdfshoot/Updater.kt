@@ -159,7 +159,7 @@ object Updater {
         connection.readTimeout = 30_000
         try {
             if (connection.responseCode != 200) throw IOException("HTTP ${connection.responseCode} ${update.url}")
-            val length = connection.contentLengthLong
+            val length = connection.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L // contentLengthLong — лише з Android 7
             connection.inputStream.use { input -> part.outputStream().use { input.copyTo(it) } }
             if (length >= 0 && part.length() != length) throw IOException("${part.length()} з $length байтів")
             if (!part.renameTo(apk)) throw IOException("rename $part")
@@ -294,7 +294,7 @@ class UpdateJob : JobService() {
         fun schedule(context: Context) {
             if (!Updater.enabled(context)) return
             val scheduler = context.getSystemService(JobScheduler::class.java)
-            if (scheduler.getPendingJob(JOB_ID) != null) return
+            if (scheduler.allPendingJobs.any { it.id == JOB_ID }) return // getPendingJob — лише з Android 7
             scheduler.schedule(
                 JobInfo.Builder(JOB_ID, ComponentName(context, UpdateJob::class.java))
                     .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)

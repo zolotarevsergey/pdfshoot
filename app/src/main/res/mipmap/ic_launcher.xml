@@ -1,0 +1,10 @@
+<!-- Значок для Android 6–7, де ще немає адаптивних значків: той самий малюнок на синьому крузі. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp" android:viewportWidth="72" android:viewportHeight="72">
+    <path android:fillColor="#FF1565C0" android:pathData="M36,36m-34,0a34,34 0,1 1,68 0a34,34 0,1 1,-68 0" />
+    <group android:translateX="-18" android:translateY="-18">
+        <path android:fillColor="#FFFFFFFF" android:pathData="M40,30h20l10,10v36a2,2 0,0 1,-2 2H40a2,2 0,0 1,-2 -2V32a2,2 0,0 1,2 -2z" />
+        <path android:fillColor="#FFBBDEFB" android:pathData="M60,30l10,10H62a2,2 0,0 1,-2 -2z" />
+        <path android:fillColor="#FF1565C0" android:pathData="M44,48h20v3H44zM44,56h20v3H44zM44,64h13v3H44z" />
+    </group>
+</vector>

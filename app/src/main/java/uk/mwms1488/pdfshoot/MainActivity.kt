@@ -1,10 +1,12 @@
 package uk.mwms1488.pdfshoot
 
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.viewModels
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
@@ -36,11 +38,29 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+    private val session: ScanSession by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent { PdfShootTheme { App() } }
+        setContent { PdfShootTheme { App(onExit = ::finish) } }
         UpdateJob.schedule(this)
+        if (!session.launchHandled) {
+            session.launchHandled = true
+            openPdf(intent, cold = true)
+        }
+    }
+
+    /** Застосунок уже відкритий, а в іншій програмі обрали «Відкрити PDF» ним. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openPdf(intent, cold = false)
+    }
+
+    private fun openPdf(intent: Intent?, cold: Boolean) {
+        val uri = intent?.takeIf { it.action == Intent.ACTION_VIEW }?.data ?: return
+        session.openExternal(uri, cold)
     }
 
     override fun onResume() {
@@ -70,7 +90,7 @@ private fun PdfShootTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun App() {
+private fun App(onExit: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val session: ScanSession = viewModel()
@@ -154,7 +174,7 @@ private fun App() {
         when (target) {
             Screen.List -> ListScreen(
                 docs = docs,
-                saving = saving,
+                saving = saving || session.opening,
                 onScan = { session.screen = Screen.Camera },
                 appVersion = remember { Updater.installedName(context) },
                 onShareApk = {
@@ -226,11 +246,27 @@ private fun App() {
 
             is Screen.Viewer -> {
                 val file = File(target.path)
+                // Повертати сторінки вміємо лише у файлах, записаних нами.
+                val ours = remember(file) { PdfWriter.rotations(file) != null }
                 ViewerScreen(
                     file = file,
-                    onBack = { session.screen = Screen.List },
+                    onBack = {
+                        if (!target.external) session.screen = Screen.List
+                        else session.returnTo?.let { session.screen = it } ?: onExit()
+                    },
                     onShare = { Docs.share(context, file) },
-                    onRotate = { session.screen = Screen.Pages(file.path) },
+                    onRotate = if (ours) ({ session.screen = Screen.Pages(file.path) }) else null,
+                    onKeep = if (!target.external) null else ({
+                        scope.launch {
+                            runCatching { withContext(Dispatchers.IO) { Docs.keep(context, file) } }
+                                .onSuccess {
+                                    version++
+                                    session.screen = Screen.Viewer(it.path)
+                                    Toast.makeText(context, "Збережено до сканів", Toast.LENGTH_SHORT).show()
+                                }
+                                .onFailure { Toast.makeText(context, "Не вдалося зберегти", Toast.LENGTH_SHORT).show() }
+                        }
+                    }),
                 )
             }
 

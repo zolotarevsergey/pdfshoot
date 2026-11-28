@@ -2,6 +2,7 @@ package uk.mwms1488.pdfshoot
 
 import android.graphics.Bitmap
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -72,7 +73,14 @@ private const val MAX_ZOOM = 5f
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ViewerScreen(file: File, onBack: () -> Unit, onShare: () -> Unit, onRotate: () -> Unit) {
+fun ViewerScreen(
+    file: File,
+    onBack: () -> Unit,
+    onShare: () -> Unit,
+    onRotate: (() -> Unit)?,      // null — файл записаний не нами, кут сторінок у ньому не поправити
+    onKeep: (() -> Unit)? = null, // PDF з іншої програми: «Зберегти до сканів»
+) {
+    BackHandler(onBack = onBack)
     val pdf = remember(file) { runCatching { PdfDoc(file) }.getOrNull() }
     DisposableEffect(pdf) { onDispose { pdf?.close() } }
 
@@ -95,8 +103,15 @@ fun ViewerScreen(file: File, onBack: () -> Unit, onShare: () -> Unit, onRotate: 
                     IconButton(onClick = onBack) { Icon(painterResource(R.drawable.ic_back), contentDescription = "Назад") }
                 },
                 actions = {
-                    IconButton(enabled = pdf != null, onClick = onRotate) {
-                        Icon(painterResource(R.drawable.ic_rotate), contentDescription = "Повернути сторінки")
+                    if (onKeep != null) {
+                        IconButton(enabled = pdf != null, onClick = onKeep) {
+                            Icon(painterResource(R.drawable.ic_save), contentDescription = "Зберегти до сканів")
+                        }
+                    }
+                    if (onRotate != null) {
+                        IconButton(enabled = pdf != null, onClick = onRotate) {
+                            Icon(painterResource(R.drawable.ic_rotate), contentDescription = "Повернути сторінки")
+                        }
                     }
                     IconButton(onClick = onShare) {
                         Icon(painterResource(R.drawable.ic_share), contentDescription = "Поширити")

@@ -17,10 +17,11 @@ android {
 
     defaultConfig {
         applicationId = "uk.mwms1488.pdfshoot"
-        minSdk = 26
+        // Android 6.0 — найстарший, на якому працюють CameraX і Compose.
+        minSdk = 23
         targetSdk = 36
-        versionCode = 6
-        versionName = "1.5"
+        versionCode = 7
+        versionName = "1.6"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // OpenCV — нативна бібліотека: лише архітектури телефонів (і емулятора на Mac), без x86.
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }

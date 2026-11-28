@@ -3,6 +3,7 @@ package uk.mwms1488.pdfshoot
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import android.widget.Toast
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -35,7 +36,8 @@ sealed interface Screen {
     data object Camera : Screen
     data class Review(val index: Int) : Screen
     data class Crop(val id: Long) : Screen
-    data class Viewer(val path: String) : Screen
+    /** [external] — PDF, відкритий з іншої програми: лежить у кеші, а не серед сканів. */
+    data class Viewer(val path: String, val external: Boolean = false) : Screen
     data class Pages(val path: String) : Screen
 }
 
@@ -45,6 +47,17 @@ enum class FlashMode(val label: String) { Off("Вимк."), Auto("Авто"), On
 class ScanSession(app: Application) : AndroidViewModel(app) {
     val pages = mutableStateListOf<Page>()
     var screen by mutableStateOf<Screen>(Screen.List)
+
+    /** Чи вже оброблено намір, яким запущено застосунок (поворот екрана не відкриває файл удруге). */
+    var launchHandled = false
+
+    /** Триває копіювання PDF, відкритого з іншої програми. */
+    var opening by mutableStateOf(false)
+        private set
+
+    /** Куди повернутись із такого PDF; null — застосунок запущено самим файлом, «Назад» його закриває. */
+    var returnTo: Screen? = null
+        private set
 
     private val prefs = app.getSharedPreferences("scan", Context.MODE_PRIVATE)
     var flash by mutableStateOf(runCatching { FlashMode.valueOf(prefs.getString("flash", null)!!) }.getOrDefault(FlashMode.Off))
@@ -64,6 +77,26 @@ class ScanSession(app: Application) : AndroidViewModel(app) {
         dir.deleteRecursively() // залишки скану, перерваного закриттям застосунку
         dir.mkdirs()
         viewModelScope.launch(Dispatchers.Default) { DocImage.warmUp() }
+    }
+
+    /**
+     * PDF з іншої програми: копіюємо в кеш (право читати адресу діє недовго) й показуємо.
+     * [cold] — застосунок запущено цим файлом, а не він уже був відкритий.
+     */
+    fun openExternal(uri: Uri, cold: Boolean) {
+        val context = getApplication<Application>()
+        opening = true
+        viewModelScope.launch {
+            val file = withContext(Dispatchers.IO) { runCatching { Docs.copyExternal(context, uri) }.getOrNull() }
+            opening = false
+            if (file == null) {
+                Toast.makeText(context, "Не вдалося відкрити PDF", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val now = screen
+            if (!(now is Screen.Viewer && now.external)) returnTo = if (cold) null else now
+            screen = Screen.Viewer(file.path, external = true)
+        }
     }
 
     fun nextFlash() {
